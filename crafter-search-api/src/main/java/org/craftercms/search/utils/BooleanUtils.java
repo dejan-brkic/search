@@ -25,8 +25,7 @@ public class BooleanUtils extends org.apache.commons.lang3.BooleanUtils {
 
     /**
      * Just as {@link #toBoolean(String)}, except that true will be returned if str = null when {@code trueIfNull} is
-     * true,
-     * false otherwise.
+     * true, false otherwise.
      */
     public static final boolean toBoolean(String str, boolean trueIfNull) {
         if (str == null && trueIfNull) {

@@ -17,48 +17,42 @@
 package org.craftercms.search.service.impl;
 
 import java.io.File;
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.charset.Charset;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.collections4.MapUtils;
-import org.apache.commons.lang3.CharEncoding;
 import org.apache.commons.lang3.StringUtils;
+import org.craftercms.commons.lang.UrlUtils;
+import org.craftercms.commons.rest.Result;
 import org.craftercms.search.exception.SearchException;
 import org.craftercms.search.service.Query;
 import org.craftercms.search.service.SearchService;
-import org.craftercms.search.utils.StringHttpMessageConverterExtended;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Required;
 import org.springframework.core.io.FileSystemResource;
-import org.springframework.http.converter.ByteArrayHttpMessageConverter;
-import org.springframework.http.converter.FormHttpMessageConverter;
-import org.springframework.http.converter.HttpMessageConverter;
-import org.springframework.http.converter.ResourceHttpMessageConverter;
-import org.springframework.http.converter.feed.AtomFeedHttpMessageConverter;
-import org.springframework.http.converter.feed.RssChannelHttpMessageConverter;
-import org.springframework.http.converter.json.MappingJacksonHttpMessageConverter;
-import org.springframework.http.converter.xml.Jaxb2RootElementHttpMessageConverter;
-import org.springframework.http.converter.xml.SourceHttpMessageConverter;
-import org.springframework.http.converter.xml.XmlAwareFormHttpMessageConverter;
-import org.springframework.util.ClassUtils;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 
-import static org.craftercms.search.service.SearchRestConstants.REQUEST_PARAM_DOCUMENT;
-import static org.craftercms.search.service.SearchRestConstants.REQUEST_PARAM_ID;
-import static org.craftercms.search.service.SearchRestConstants.REQUEST_PARAM_IGNORE_ROOT_IN_FIELD_NAMES;
-import static org.craftercms.search.service.SearchRestConstants.REQUEST_PARAM_SITE;
-import static org.craftercms.search.service.SearchRestConstants.URL_COMMIT;
-import static org.craftercms.search.service.SearchRestConstants.URL_DELETE;
-import static org.craftercms.search.service.SearchRestConstants.URL_ROOT;
-import static org.craftercms.search.service.SearchRestConstants.URL_SEARCH;
-import static org.craftercms.search.service.SearchRestConstants.URL_UPDATE;
-import static org.craftercms.search.service.SearchRestConstants.URL_UPDATE_DOCUMENT;
+import static org.craftercms.search.rest.SearchRestApiConstants.PARAM_CONTENT;
+import static org.craftercms.search.rest.SearchRestApiConstants.PARAM_ID;
+import static org.craftercms.search.rest.SearchRestApiConstants.PARAM_IGNORE_ROOT_IN_FIELD_NAMES;
+import static org.craftercms.search.rest.SearchRestApiConstants.PARAM_SITE;
+import static org.craftercms.search.rest.SearchRestApiConstants.PARAM_INDEX_ID;
+import static org.craftercms.search.rest.SearchRestApiConstants.URL_COMMIT;
+import static org.craftercms.search.rest.SearchRestApiConstants.URL_DELETE;
+import static org.craftercms.search.rest.SearchRestApiConstants.URL_ROOT;
+import static org.craftercms.search.rest.SearchRestApiConstants.URL_SEARCH;
+import static org.craftercms.search.rest.SearchRestApiConstants.URL_UPDATE;
+import static org.craftercms.search.rest.SearchRestApiConstants.URL_UPDATE_CONTENT;
 
 /**
  * Client implementation of {@link SearchService}, which uses REST to communicate with the server
@@ -67,47 +61,13 @@ import static org.craftercms.search.service.SearchRestConstants.URL_UPDATE_DOCUM
  */
 public class RestClientSearchService implements SearchService {
 
-    private static final boolean jaxb2Present = ClassUtils.isPresent("javax.xml.bind.Binder", RestTemplate.class
-        .getClassLoader());
-
-    private static final boolean jacksonPresent =
-        ClassUtils.isPresent("org.codehaus.jackson.map.ObjectMapper", RestTemplate.class.getClassLoader()) &&
-        ClassUtils.isPresent("org.codehaus.jackson.JsonGenerator", RestTemplate.class.getClassLoader());
-
-    private static boolean romePresent = ClassUtils.isPresent("com.sun.syndication.feed.WireFeed", RestTemplate.class
-        .getClassLoader());
+    private static final Logger logger = LoggerFactory.getLogger(RestClientSearchService.class);
 
     protected String serverUrl;
     protected RestTemplate restTemplate;
 
     public RestClientSearchService() {
         restTemplate = new RestTemplate();
-
-        List<HttpMessageConverter<?>> messageConverters = new ArrayList<HttpMessageConverter<?>>();
-
-        messageConverters.add(new ByteArrayHttpMessageConverter());
-        messageConverters.add(new StringHttpMessageConverterExtended(Charset.forName(CharEncoding.UTF_8)));
-        messageConverters.add(new FormHttpMessageConverter());
-        messageConverters.add(new ResourceHttpMessageConverter());
-        messageConverters.add(new SourceHttpMessageConverter());
-        messageConverters.add(new XmlAwareFormHttpMessageConverter());
-
-        if (jaxb2Present) {
-            messageConverters.add(new Jaxb2RootElementHttpMessageConverter());
-        }
-        if (jacksonPresent) {
-            messageConverters.add(new MappingJacksonHttpMessageConverter());
-        }
-        if (romePresent) {
-            messageConverters.add(new AtomFeedHttpMessageConverter());
-            messageConverters.add(new RssChannelHttpMessageConverter());
-        }
-
-        restTemplate.setMessageConverters(messageConverters);
-    }
-
-    public String getServerUrl() {
-        return serverUrl;
     }
 
     @Required
@@ -120,109 +80,205 @@ public class RestClientSearchService implements SearchService {
     }
 
     public Map<String, Object> search(Query query) throws SearchException {
-        String searchUrl = serverUrl + URL_ROOT + URL_SEARCH + "?" + query.toQueryString();
+        return search(null, query);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> search(String indexId, Query query) throws SearchException {
+        String searchUrl = createBaseUrl(URL_SEARCH, indexId);
+        searchUrl = UrlUtils.addQueryStringFragment(searchUrl, query.toQueryString());
 
         try {
             return restTemplate.getForObject(new URI(searchUrl), Map.class);
         } catch (URISyntaxException e) {
-            throw new SearchException("Invalid URI: " + searchUrl, e);
+            throw new SearchException(indexId, "Invalid URI: " + searchUrl, e);
         } catch (HttpStatusCodeException e) {
-            throw new SearchException(
-                "Search for query " + query + " failed: [" + e.getStatusText() + "] " + e.getResponseBodyAsString());
+            throw new SearchException(indexId, "Search for query " + query + " failed: [" + e.getStatusText() + "] " +
+                                               e.getResponseBodyAsString());
         } catch (Exception e) {
-            throw new SearchException("Search for query " + query + " failed: " + e.getMessage(), e);
+            throw new SearchException(indexId, "Search for query " + query + " failed: " + e.getMessage(), e);
         }
     }
 
-    public String update(String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
-        String updateUrl = serverUrl + URL_ROOT + URL_UPDATE + "?" + REQUEST_PARAM_SITE + "=" + site + "&" +
-                           REQUEST_PARAM_ID +
-                           "=" + id + "&" + REQUEST_PARAM_IGNORE_ROOT_IN_FIELD_NAMES + "=" + ignoreRootInFieldNames;
+    public void update(String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
+        update(null, site, id, xml, ignoreRootInFieldNames);
+    }
+
+    @Override
+    public void update(String indexId, String site, String id, String xml,
+                         boolean ignoreRootInFieldNames) throws SearchException {
+        String updateUrl = createBaseUrl(URL_UPDATE, indexId);
+        updateUrl = addParam(updateUrl, PARAM_SITE, site);
+        updateUrl = addParam(updateUrl, PARAM_ID, id);
+        updateUrl = addParam(updateUrl, PARAM_IGNORE_ROOT_IN_FIELD_NAMES, ignoreRootInFieldNames);
 
         try {
-            return restTemplate.postForObject(new URI(updateUrl), xml, String.class);
+            Result result = restTemplate.postForObject(new URI(updateUrl), xml, Result.class);
+
+            logger.debug("Result of {}: {}", updateUrl, result);
         } catch (URISyntaxException e) {
-            throw new SearchException("Invalid URI: " + updateUrl, e);
+            throw new SearchException(indexId, "Invalid URI: " + updateUrl, e);
         } catch (HttpStatusCodeException e) {
-            throw new SearchException(
-                "Update for XML '" + id + "' failed: [" + e.getStatusText() + "] " + e.getResponseBodyAsString());
+            throw new SearchException(indexId, "Update for XML '" + id + "' failed: [" + e.getStatusText() + "] " +
+                                               e.getResponseBodyAsString());
         } catch (Exception e) {
-            throw new SearchException("Update for XML '" + id + "' failed: " + e.getMessage(), e);
+            throw new SearchException(indexId, "Update for XML '" + id + "' failed: " + e.getMessage(), e);
         }
     }
 
-    public String delete(String site, String id) throws SearchException {
-        String deleteUrl = serverUrl + URL_ROOT + URL_DELETE + "?" + REQUEST_PARAM_SITE + "=" + site + "&" +
-                           REQUEST_PARAM_ID + "=" + id;
+    public void delete(String site, String id) throws SearchException {
+        delete(null, site, id);
+    }
+
+    @Override
+    public void delete(String indexId, String site, String id) throws SearchException {
+        String deleteUrl = createBaseUrl(URL_DELETE, indexId);
+        deleteUrl = addParam(deleteUrl, PARAM_SITE, site);
+        deleteUrl = addParam(deleteUrl, PARAM_ID, id);
 
         try {
-            return restTemplate.postForObject(new URI(deleteUrl), null, String.class);
+            Result result = restTemplate.postForObject(new URI(deleteUrl), null, Result.class);
+
+            logger.debug("Result of {}: {}", deleteUrl, result);
         } catch (URISyntaxException e) {
-            throw new SearchException("Invalid URI: " + deleteUrl, e);
+            throw new SearchException(indexId, "Invalid URI: " + deleteUrl, e);
         } catch (HttpStatusCodeException e) {
-            throw new SearchException(
-                "Delete for XML '" + id + "' failed: [" + e.getStatusText() + "] " + e.getResponseBodyAsString());
+            throw new SearchException(indexId, "Delete for XML '" + id + "' failed: [" + e.getStatusText() + "] " +
+                                               e.getResponseBodyAsString());
         } catch (Exception e) {
-            throw new SearchException("Delete for XML '" + id + "' failed: " + e.getMessage(), e);
+            throw new SearchException(indexId, "Delete for XML '" + id + "' failed: " + e.getMessage(), e);
         }
     }
 
-    public String commit() throws SearchException {
-        String commitUrl = serverUrl + URL_ROOT + URL_COMMIT;
+    public void commit() throws SearchException {
+        commit(null);
+    }
+
+    @Override
+    public void commit(String indexId) throws SearchException {
+        String commitUrl = createBaseUrl(URL_COMMIT, indexId);
 
         try {
-            return restTemplate.postForObject(new URI(commitUrl), null, String.class);
+            Result result = restTemplate.postForObject(new URI(commitUrl), null, Result.class);
+
+            logger.debug("Result of {}: {}", commitUrl, result);
         } catch (URISyntaxException e) {
-            throw new SearchException("Invalid URI: " + commitUrl, e);
+            throw new SearchException(indexId, "Invalid URI: " + commitUrl, e);
         } catch (HttpStatusCodeException e) {
-            throw new SearchException("Commit failed: [" + e.getStatusText() + "] " + e.getResponseBodyAsString());
+            throw new SearchException(indexId, "Commit failed: [" + e.getStatusText() + "] " + e.getResponseBodyAsString());
         } catch (Exception e) {
-            throw new SearchException("Commit failed: " + e.getMessage(), e);
+            throw new SearchException(indexId, "Commit failed: " + e.getMessage(), e);
         }
     }
 
     @Override
-    public String updateDocument(String site, String id, File document) throws SearchException {
-        return updateDocument(site, id, document, null);
+    public void updateContent(String site, String id, File file) throws SearchException {
+        updateContent(null, site, id, file, null);
     }
 
     @Override
-    public String updateDocument(String site, String id, File document,
-                                 Map<String, String> additionalFields) throws SearchException {
-        FileSystemResource fsrDoc = new FileSystemResource(document);
-        MultiValueMap<String, Object> form = new LinkedMultiValueMap<String, Object>();
+    public void updateContent(String indexId, String site, String id, File file) throws SearchException {
+        updateContent(indexId, site, id, file, null);
+    }
 
-        form.add(REQUEST_PARAM_SITE, site);
-        form.add(REQUEST_PARAM_ID, id);
-        form.add(REQUEST_PARAM_DOCUMENT, fsrDoc);
+    @Override
+    public void updateContent(String site, String id, File file, Map<String, List<String>> additionalFields) throws SearchException {
+        updateContent(null, site, id, file, additionalFields);
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, File file,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        updateContent(indexId, site, id, new FileSystemResource(file), additionalFields);
+    }
+
+    @Override
+    public void updateContent(String site, String id, InputStream content) throws SearchException {
+        updateContent(null, site, id, content, null);
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, InputStream content) throws SearchException {
+        updateContent(indexId, site, id, content, null);
+    }
+
+    @Override
+    public void updateContent(String site, String id, InputStream content,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        updateContent(null, site, id, content, additionalFields);
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, InputStream content,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        updateContent(indexId, site, id, new InputStreamResource(content), additionalFields);
+    }
+
+    @SuppressWarnings("unchecked")
+    protected void updateContent(String indexId, String site, String id, Resource resource,
+                                 Map<String, List<String>> additionalFields) throws SearchException {
+        MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
+
+        if (StringUtils.isNotEmpty(indexId)) {
+            form.set(PARAM_INDEX_ID, indexId);
+        }
+        form.set(PARAM_SITE, site);
+        form.set(PARAM_ID, id);
+        form.set(PARAM_CONTENT, resource);
 
         if (MapUtils.isNotEmpty(additionalFields)) {
-            for (Map.Entry<String, String> additionalField : additionalFields.entrySet()) {
+            for (Map.Entry<String, List<String>> additionalField : additionalFields.entrySet()) {
                 String fieldName = additionalField.getKey();
 
-                if (fieldName.equals(REQUEST_PARAM_SITE) ||
-                    fieldName.equals(REQUEST_PARAM_ID) ||
-                    fieldName.equals(REQUEST_PARAM_DOCUMENT)) {
-                    throw new SearchException(String.format("An additional field shouldn't have the " +
-                                                            "following names: %s, %s, %s", REQUEST_PARAM_SITE,
-                                                            REQUEST_PARAM_ID, REQUEST_PARAM_DOCUMENT));
+                if (fieldName.equals(PARAM_INDEX_ID) ||
+                    fieldName.equals(PARAM_SITE) ||
+                    fieldName.equals(PARAM_ID) ||
+                    fieldName.endsWith(PARAM_CONTENT)) {
+                    throw new SearchException(String.format("An additional field shouldn't have the following names: %s, %s, %s, %s",
+                                                            PARAM_INDEX_ID, PARAM_SITE, PARAM_ID, PARAM_CONTENT));
                 }
 
-                form.add(fieldName, additionalField.getValue());
+                form.put(fieldName, (List) additionalField.getValue());
             }
         }
 
-        String updateDocumentUrl = serverUrl + URL_ROOT + URL_UPDATE_DOCUMENT;
+        String updateUrl = createBaseUrl(URL_UPDATE_CONTENT);
 
         try {
-            return restTemplate.postForObject(new URI(updateDocumentUrl), form, String.class);
+            Result result = restTemplate.postForObject(new URI(updateUrl), form, Result.class);
+
+            logger.debug("Result of {}: {}", updateUrl, result);
         } catch (URISyntaxException e) {
-            throw new SearchException("Invalid URI: " + updateDocumentUrl, e);
+            throw new SearchException(indexId, "Invalid URI: " + updateUrl, e);
         } catch (HttpStatusCodeException e) {
-            throw new SearchException(
-                "Update for document '" + id + "' failed: [" + e.getStatusText() + "] " + e.getResponseBodyAsString());
+            throw new SearchException(indexId, "Update for content '" + id + "' failed: [" + e.getStatusText() + "] " +
+                                               e.getResponseBodyAsString());
         } catch (Exception e) {
-            throw new SearchException("Update for document '" + id + "' failed: " + e.getMessage(), e);
+            throw new SearchException(indexId, "Update for content '" + id + "' failed: " + e.getMessage(), e);
+        }
+    }
+
+    protected String createBaseUrl(String serviceUrl) {
+        return UrlUtils.concat(serverUrl, URL_ROOT, serviceUrl);
+    }
+
+    protected String createBaseUrl(String serviceUrl, String indexId) {
+        String url = createBaseUrl(serviceUrl);
+
+        if (StringUtils.isNotEmpty(indexId)) {
+            url = addParam(url, PARAM_INDEX_ID, indexId);
+        }
+
+        return url;
+    }
+
+    protected String addParam(String url, String name, Object value) {
+        try {
+            return UrlUtils.addParam(url, name, value.toString(), "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            // Shouldn't happen, UTF-8 is a valid encoding
+            throw new RuntimeException();
         }
     }
 

@@ -1,6 +1,24 @@
+/*
+ * Copyright (C) 2007-2016 Crafter Software Corporation.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 package org.craftercms.search.service.impl;
 
 import java.io.File;
+import java.io.InputStream;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
@@ -42,48 +60,138 @@ public class DualSearchService implements SearchService {
     }
 
     @Override
-    public String update(String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
+    public Map<String, Object> search(String indexId, Query query) throws SearchException {
+        return readService.search(indexId, query);
+    }
+
+    @Override
+    public void update(String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
         if (writeService != null) {
-            return writeService.update(site, id, xml, ignoreRootInFieldNames);
+            writeService.update(site, id, xml, ignoreRootInFieldNames);
         } else {
-            return handleNoWriteServiceProvided();
+            handleNoWriteServiceProvided();
         }
     }
 
     @Override
-    public String delete(String site, String id) throws SearchException {
+    public void update(String indexId, String site, String id, String xml,
+                         boolean ignoreRootInFieldNames) throws SearchException {
         if (writeService != null) {
-            return writeService.delete(site, id);
+            writeService.update(indexId, site, id, xml, ignoreRootInFieldNames);
         } else {
-            return handleNoWriteServiceProvided();
+            handleNoWriteServiceProvided();
         }
     }
 
     @Override
-    public String commit() throws SearchException {
+    public void delete(String site, String id) throws SearchException {
         if (writeService != null) {
-            return writeService.commit();
+            writeService.delete(site, id);
         } else {
-            return handleNoWriteServiceProvided();
+            handleNoWriteServiceProvided();
         }
     }
 
     @Override
-    public String updateDocument(String site, String id, File document) throws SearchException {
+    public void delete(String indexId, String site, String id) throws SearchException {
         if (writeService != null) {
-            return writeService.updateDocument(site, id, document);
+            writeService.delete(indexId, site, id);
         } else {
-            return handleNoWriteServiceProvided();
+            handleNoWriteServiceProvided();
         }
     }
 
     @Override
-    public String updateDocument(String site, String id, File document,
-                                 Map<String, String> additionalFields) throws SearchException {
+    public void commit() throws SearchException {
         if (writeService != null) {
-            return writeService.updateDocument(site, id, document, additionalFields);
+            writeService.commit();
         } else {
-            return handleNoWriteServiceProvided();
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void commit(String indexId) throws SearchException {
+        if (writeService != null) {
+            writeService.commit(indexId);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String site, String id, File file) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(site, id, file);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, File file) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(indexId, site, id, file);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String site, String id, File file,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(site, id, file, additionalFields);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, File file,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(indexId, site, id, file, additionalFields);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String site, String id, InputStream content) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(site, id, content);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, InputStream content) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(indexId, site, id, content);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String site, String id, InputStream content,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(site, id, content, additionalFields);
+        } else {
+            handleNoWriteServiceProvided();
+        }
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, InputStream content,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        if (writeService != null) {
+            writeService.updateContent(indexId, site, id, content, additionalFields);
+        } else {
+            handleNoWriteServiceProvided();
         }
     }
 

@@ -18,22 +18,25 @@ package org.craftercms.search.service.impl;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import javax.activation.MimetypesFileTypeMap;
+import javax.activation.FileTypeMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.collections.MapUtils;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrResponse;
-import org.apache.solr.client.solrj.SolrServer;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.request.AbstractUpdateRequest;
 import org.apache.solr.client.solrj.request.ContentStreamUpdateRequest;
-import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.SolrInputDocument;
@@ -45,11 +48,11 @@ import org.craftercms.search.exception.SearchException;
 import org.craftercms.search.exception.SolrDocumentBuildException;
 import org.craftercms.search.service.Query;
 import org.craftercms.search.service.SearchService;
+import org.craftercms.search.service.SolrDocumentBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Required;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
-
-import static org.craftercms.search.service.SearchRestConstants.SOLR_CONTENT_STREAM_UPDATE_URL;
+import org.springframework.mail.javamail.ConfigurableMimeFileTypeMap;
 
 /**
  * Implementation of {@link SearchService} using Solr as the underlying search engine.
@@ -60,14 +63,28 @@ import static org.craftercms.search.service.SearchRestConstants.SOLR_CONTENT_STR
  */
 public class SolrSearchService implements SearchService {
 
-    public static final String FILE_NAME_FIELD_NAME = "file-name";
+    public static final String DEFAULT_FILE_NAME_FIELD_NAME = "file-name";
+    public static final String SOLR_CONTENT_STREAM_UPDATE_URL = "/update/extract";
 
-    private static final Log logger = LogFactory.getLog(SolrSearchService.class);
+    public static final String DOCUMENT_LIST_START_PROPERTY_NAME = "start";
+    public static final String DOCUMENT_LIST_NUM_FOUND_PROPERTY_NAME = "numFound";
+    public static final String DOCUMENT_LIST_MAX_SCORE_PROPERTY_NAME = "maxScore";
+    public static final String DOCUMENT_LIST_DOCUMENTS_PROPERTY_NAME = "documents";
+
+    private static final Logger logger = LoggerFactory.getLogger(SolrSearchService.class);
 
     /**
-     * The endpoint to the Solr server.
+     * The ID of the default index.
      */
-    protected SolrServer solrServer;
+    protected String defaultIndexId;
+    /**
+     * The file name field name (default is file-name).
+     */
+    protected String fileNameFieldName;
+    /**
+     * The Solr client used to execute requests against a Solr server.
+     */
+    protected SolrClient solrClient;
     /**
      * The Solr document builder, to build Solr documents from generic XML documents.
      */
@@ -80,13 +97,45 @@ public class SolrSearchService implements SearchService {
      * The regex pattern used to ignore those additional fields that shouldn't be parsed for multi value.
      */
     protected String multiValueIgnorePattern;
+    /**
+     * ID regex/delete query mappings that can be used to specify special delete queries for certain files,
+     * e.g. delete XML documents with their sub-documents.
+     */
+    protected Map<String, String> deleteQueryMappings;
+    /**
+     * Set of additional filter queries that should be used on all search requests
+     */
+    protected String[] additionalFilterQueries;
+    /**
+     * Mime type map used to retrieve the mime types of files when submitting binary/structured content for indexing.
+     */
+    protected FileTypeMap mimeTypesMap;
+
+    public SolrSearchService() {
+        fileNameFieldName = DEFAULT_FILE_NAME_FIELD_NAME;
+        mimeTypesMap = new ConfigurableMimeFileTypeMap();
+    }
 
     /**
-     * Sets the endpoint to the Solr server.
+     * Sets the ID of the default index.
+     */
+    public void setDefaultIndexId(String defaultIndexId) {
+        this.defaultIndexId = defaultIndexId;
+    }
+
+    /**
+     * Sets the file name field (default is file-name).
+     */
+    public void setFileNameFieldName(String fileNameFieldName) {
+        this.fileNameFieldName = fileNameFieldName;
+    }
+
+    /**
+     * Sets the Solr client used to execute requests against a Solr server.
      */
     @Required
-    public void setSolrServer(SolrServer solrServer) {
-        this.solrServer = solrServer;
+    public void setSolrClient(SolrClient solrClient) {
+        this.solrClient = solrClient;
     }
 
     /**
@@ -114,29 +163,55 @@ public class SolrSearchService implements SearchService {
     }
 
     /**
+     * Sets ID regex/delete query mappings that can be used to specify special delete queries for certain
+     * files, e.g. delete XML documents with their sub-documents.
+     */
+    public void setDeleteQueryMappings(Map<String, String> deleteQueryMappings) {
+        this.deleteQueryMappings = deleteQueryMappings;
+    }
+
+    /**
+     * Sets the set of additional filter queries that should be used on all search requests
+     */
+    public void setAdditionalFilterQueries(String[] additionalFilterQueries) {
+        this.additionalFilterQueries = additionalFilterQueries;
+    }
+
+    /**
      * {@inheritDoc}
      */
     public Map<String, Object> search(Query query) {
-        if (logger.isDebugEnabled()) {
-            logger.debug("Searching: " + query);
+        return search(null, query);
+    }
+
+    @Override
+    public Map<String, Object> search(String indexId, Query query) throws SearchException {
+        if (StringUtils.isEmpty(indexId)) {
+            indexId = defaultIndexId;
         }
 
+        SolrQuery expandedQuery = new SolrQuery((QueryParams)query);
         SolrResponse response;
+
+        addAdditionalFilterQueries(expandedQuery);
+
+        logger.info("{}Executing query {}", getIndexPrefix(indexId), expandedQuery);
+
         try {
-            response = solrServer.query(toSolrQuery((QueryParams)query));
-        } catch (SolrServerException e) {
-            throw new SearchException("Search for query " + query + " failed", e);
+            response = solrClient.query(indexId, toSolrQuery(expandedQuery));
+        } catch (SolrServerException | IOException e) {
+            throw new SearchException(indexId, "Search for query " + query + " failed", e);
         }
 
         // Solr search result is a List<Map.Entry<String,Object>>, where every entry is a (name,value) pair,
         // and there can be
         // duplicate names in the list.
         NamedList<Object> list = response.getResponse();
-        // Convert this list into a ,ap where values of the same name are grouped into a list.
+        // Convert this list into a map where values of the same name are grouped into a list.
         Map<String, Object> map = toMap(list);
 
         if (logger.isDebugEnabled()) {
-            logger.debug("Response for query " + query + ": " + map);
+            logger.debug("{}Response for query {}: {}", getIndexPrefix(indexId), query, map);
         }
 
         return map;
@@ -145,65 +220,179 @@ public class SolrSearchService implements SearchService {
     /**
      * {@inheritDoc}
      */
-    public String update(String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
+    public void update(String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
+        update(null, site, id, xml, ignoreRootInFieldNames);
+    }
+
+    @Override
+    public void update(String indexId, String site, String id, String xml, boolean ignoreRootInFieldNames) throws SearchException {
+        if (StringUtils.isEmpty(indexId)) {
+            indexId = defaultIndexId;
+        }
+
         String finalId = site + ":" + id;
+
+        // This is done because when a document is updated, and it had children before but not now, the children
+        // will be orphaned (SOLR-6096)
+        delete(indexId, site, id);
 
         try {
             SolrInputDocument solrDoc = solrDocumentBuilder.build(site, id, xml, ignoreRootInFieldNames);
-            UpdateResponse response = solrServer.add(solrDoc);
+            NamedList<Object> response = solrClient.add(indexId, solrDoc).getResponse();
 
-            if (logger.isDebugEnabled()) {
-                logger.debug("Update response for '" + finalId + "': " + response.getResponse());
-            }
-
-            return "Successfully updated '" + finalId + "'";
+            logger.info(getSuccessfulMessage(indexId, finalId, "Update", response));
         } catch (SolrDocumentBuildException e) {
-            throw new SearchException("Unable to build Solr document for '" + finalId + "'", e);
+            throw new SearchException(indexId, "Unable to build Solr document for " + finalId, e);
         } catch (IOException e) {
-            throw new SearchException("I/O error while executing update for '" + finalId + "'", e);
+            throw new SearchException(indexId,  "I/O error while executing update for " + finalId, e);
         } catch (Exception e) {
-            throw new SearchException(e.getMessage(), e);
+            throw new SearchException(indexId, "Error executing update for " + finalId, e);
         }
     }
 
     /**
      * {@inheritDoc}
      */
-    public String delete(String site, String id) throws SearchException {
+    public void delete(String site, String id) throws SearchException {
+        delete(null, site, id);
+    }
+
+    @Override
+    public void delete(String indexId, String site, String id) throws SearchException {
+        if (StringUtils.isEmpty(indexId)) {
+            indexId = defaultIndexId;
+        }
+
         String finalId = site + ":" + id;
-
+        String query = getDeleteQuery(finalId);
+        NamedList<Object> response;
+        String msg;
 
         try {
-            UpdateResponse response = solrServer.deleteById(finalId);
-
-            if (logger.isDebugEnabled()) {
-                logger.debug("Delete response for '" + finalId + "': " + response.getResponse());
+            if (StringUtils.isNotEmpty(query)) {
+                response = solrClient.deleteByQuery(indexId, query).getResponse();
+                msg = getSuccessfulMessage(indexId, query, "Delete", response);
+            } else {
+                response = solrClient.deleteById(indexId, finalId).getResponse();
+                msg = getSuccessfulMessage(indexId, finalId, "Delete", response);
             }
 
-            return "Successfully deleted '" + finalId + "'";
+            logger.info(msg);
         } catch (IOException e) {
-            throw new SearchException("I/O error while executing delete for '" + finalId + "'", e);
+            if (StringUtils.isNotEmpty(query)) {
+                throw new SearchException(indexId, "I/O error while executing delete for " + query, e);
+            } else {
+                throw new SearchException(indexId, "I/O error while executing delete for " + finalId, e);
+            }
         } catch (Exception e) {
-            throw new SearchException(e.getMessage(), e);
+            if (StringUtils.isNotEmpty(query)) {
+                throw new SearchException(indexId, "Error executing delete for " + query, e);
+            } else {
+                throw new SearchException(indexId, "Error executing delete for " + finalId, e);
+            }
         }
     }
 
-    /**
-     * {@inheritDoc}
-     */
-    public String commit() throws SearchException {
+    @Override
+    public void updateContent(String site, String id, File file) throws SearchException {
+        updateContent(null, site, id, file, null);
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, File file) throws SearchException {
+        updateContent(indexId, site, id, file, null);
+    }
+
+    @Override
+    public void updateContent(String site, String id, File file,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        updateContent(null, site, id, file, additionalFields);
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, File file,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        if (StringUtils.isEmpty(indexId)) {
+            indexId = defaultIndexId;
+        }
+
+        String finalId = site + ":" + id;
+        String fileName = FilenameUtils.getName(id);
+        String contentType = mimeTypesMap.getContentType(fileName);
+        ContentStreamUpdateRequest request = new ContentStreamUpdateRequest(SOLR_CONTENT_STREAM_UPDATE_URL);
+        NamedList<Object> response;
+
         try {
-            UpdateResponse response = solrServer.commit();
+            ModifiableSolrParams params = solrDocumentBuilder.buildParams(site, id, ExtractingParams.LITERALS_PREFIX,
+                                                                          null, additionalFields);
+            params.set(ExtractingParams.LITERALS_PREFIX + fileNameFieldName, fileName);
 
-            if (logger.isDebugEnabled()) {
-                logger.debug("Commit response: " + response.getResponse());
+            request.setParams(params);
+            request.addFile(file, contentType);
+            request.setAction(AbstractUpdateRequest.ACTION.COMMIT, true, true);
+
+            response = solrClient.request(request, indexId);
+        } catch (SolrServerException e) {
+            logger.warn("{}Unable to update file through content stream request: {}. Attempting to perform just " +
+                        "the metadata update", getIndexPrefix(indexId), e.getMessage());
+
+            try {
+                SolrInputDocument inputDocument = solrDocumentBuilder.build(site, id, additionalFields);
+                inputDocument.setField(fileNameFieldName, fileName);
+
+                response = solrClient.add(indexId, inputDocument).getResponse();
+            } catch (IOException e1) {
+                throw new SearchException(indexId, "I/O error while executing update file for " + finalId, e1);
+            } catch (SolrServerException e1) {
+                throw new SearchException(indexId, e1.getMessage(), e1);
             }
-
-            return "Successfully committed";
         } catch (IOException e) {
-            throw new SearchException("I/O error while executing commit", e);
+            throw new SearchException(indexId, "I/O error while executing update file for " + finalId, e);
+        }
+
+        logger.info(getSuccessfulMessage(indexId, finalId, "Update file", response));
+    }
+
+    @Override
+    public void updateContent(String site, String id, InputStream content) throws SearchException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, InputStream content) throws SearchException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void updateContent(String site, String id, InputStream content,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void updateContent(String indexId, String site, String id, InputStream content,
+                              Map<String, List<String>> additionalFields) throws SearchException {
+        throw new UnsupportedOperationException();
+    }
+
+    public void commit() throws SearchException {
+        commit(null);
+    }
+
+    @Override
+    public void commit(String indexId) throws SearchException {
+        if (StringUtils.isEmpty(indexId)) {
+            indexId = defaultIndexId;
+        }
+
+        try {
+            NamedList<Object> response = solrClient.commit(indexId).getResponse();
+
+            logger.info(String.format("%sCommit successful: %s", getIndexPrefix(indexId), response));
+        } catch (IOException e) {
+            throw new SearchException(indexId, "I/O error while executing commit", e);
         } catch (Exception e) {
-            throw new SearchException(e.getMessage(), e);
+            throw new SearchException(indexId, "Error executing commit", e);
         }
     }
 
@@ -211,6 +400,7 @@ public class SolrSearchService implements SearchService {
         return new ModifiableSolrParams(queryParams.getParams());
     }
 
+    @SuppressWarnings("unchecked")
     protected Map<String, Object> toMap(NamedList<Object> namedList) {
         Map<String, Object> map = new LinkedHashMap<String, Object>();
 
@@ -224,7 +414,7 @@ public class SolrSearchService implements SearchService {
                 if (valueInMap instanceof List) {
                     group = (List<Object>)valueInMap;
                 } else {
-                    group = new ArrayList<Object>();
+                    group = new ArrayList<>();
                     group.add(valueInMap);
 
                     map.put(entry.getKey(), group);
@@ -239,88 +429,104 @@ public class SolrSearchService implements SearchService {
         return map;
     }
 
+    @SuppressWarnings("unchecked")
     protected Object toSerializableValue(Object namedListValue) {
-        // The value can also be a NamedList, so convert it to map.
         if (namedListValue instanceof NamedList) {
+            // The value can also be a NamedList, so convert it to map.
             return toMap((NamedList<Object>)namedListValue);
-        }
-        // If the value is a SolrDocumentList, copy the list attributes to a map
-        if (namedListValue instanceof SolrDocumentList) {
+        } else if (namedListValue instanceof SolrDocumentList) {
+            // If the value is a SolrDocumentList, copy the list attributes to a map
             SolrDocumentList docList = (SolrDocumentList)namedListValue;
             Map<String, Object> docListMap = new HashMap<String, Object>(4);
 
-            docListMap.put("start", docList.getStart());
-            docListMap.put("numFound", docList.getNumFound());
-            docListMap.put("maxScore", docList.getMaxScore());
-            docListMap.put("documents", new ArrayList<SolrDocument>(docList));
+            docListMap.put(DOCUMENT_LIST_START_PROPERTY_NAME, docList.getStart());
+            docListMap.put(DOCUMENT_LIST_NUM_FOUND_PROPERTY_NAME, docList.getNumFound());
+            docListMap.put(DOCUMENT_LIST_MAX_SCORE_PROPERTY_NAME, docList.getMaxScore());
+            docListMap.put(DOCUMENT_LIST_DOCUMENTS_PROPERTY_NAME, extractDocs(docList));
 
             return docListMap;
+        } else {
+            return namedListValue;
         }
-
-        return namedListValue;
     }
 
-    @Override
-    public String updateDocument(String site, String id, File document) throws SearchException {
-        return updateDocument(site, id, document, null);
-    }
+    protected Collection<Map<String, Object>> extractDocs(SolrDocumentList docList) {
+        Collection<Map<String, Object>> docs = new ArrayList<>(docList.size());
 
-    @Override
-    public String updateDocument(String site, String id, File document,
-                                 Map<String, String> additionalFields) throws SearchException {
-        String finalId = site + ":" + id;
-        String fileName = (new File(finalId)).getName();
-        Map<String, List<String>> multiValueAdditionalFields = getAdditionalFieldMapAsMultiValueMap(additionalFields);
-        MimetypesFileTypeMap mimeTypesMap = new MimetypesFileTypeMap();
-        String contentType = mimeTypesMap.getContentType(document.getName());
+        for (SolrDocument doc : docList) {
+            Map<String, Object> docMap = new LinkedHashMap<>();
 
-        ContentStreamUpdateRequest request = new ContentStreamUpdateRequest(SOLR_CONTENT_STREAM_UPDATE_URL);
-        try {
-            request.addFile(document, contentType);
+            for (Map.Entry<String, Object> field : doc) {
+                String name = field.getKey();
+                Object value = field.getValue();
 
-            ModifiableSolrParams params = solrDocumentBuilder.buildParams(site, id, ExtractingParams.LITERALS_PREFIX,
-                                                                          null, multiValueAdditionalFields);
-            params.set(ExtractingParams.LITERALS_PREFIX + FILE_NAME_FIELD_NAME, fileName);
+                // If the value is an Iterable with a single value, return just that one value. This is done for backwards
+                // compatibility since Solr 4 did this for us before
+                if (value instanceof Iterable) {
+                    Iterator<?> iter = ((Iterable<?>)value).iterator();
+                    if (iter.hasNext()) {
+                        Object first = iter.next();
+                        if (!iter.hasNext()) {
+                            value = first;
+                        }
+                    }
+                }
 
-            request.setParams(params);
-            request.setAction(AbstractUpdateRequest.ACTION.COMMIT, true, true);
-
-            solrServer.request(request);
-        } catch (SolrServerException e) {
-            logger.warn("Unable to update document through content stream request: " + e.getMessage() + ". " +
-                        "Attempting to perform just the metadata update");
-
-            try {
-                SolrInputDocument inputDocument = solrDocumentBuilder.build(site, id, multiValueAdditionalFields);
-                inputDocument.setField(FILE_NAME_FIELD_NAME, fileName);
-
-                solrServer.add(inputDocument);
-            } catch (IOException e1) {
-                throw new SearchException("I/O error while executing update document for '" + finalId + "'", e1);
-            } catch (SolrServerException e1) {
-                throw new SearchException(e1.getMessage(), e1);
+                docMap.put(name, value);
             }
-        } catch (IOException e) {
-            throw new SearchException("I/O error while executing update document for '" + finalId + "'", e);
+
+            docs.add(docMap);
         }
 
-        return "Successfully updated document '" + id + "'";
+        return docs;
     }
 
-    protected Map<String, List<String>> getAdditionalFieldMapAsMultiValueMap(Map<String, String> originalMap) {
-        MultiValueMap multiValueMap = new LinkedMultiValueMap(originalMap.size());
-        for (Map.Entry<String, String> entry : originalMap.entrySet()) {
-            String fieldName = entry.getKey();
-            String fieldValue = entry.getValue();
+    protected String getSuccessfulMessage(String indexId, String idOrQuery, String operation, Object solrResponse) {
+        return String.format("%s%s for %s successful: %s", getIndexPrefix(indexId), operation, idOrQuery, solrResponse);
+    }
 
-            if (!fieldName.matches(multiValueIgnorePattern)) {
-                multiValueMap.put(fieldName, Arrays.asList(fieldValue.split(multiValueSeparator)));
-            } else {
-                multiValueMap.add(fieldName, fieldValue);
+    protected String getIndexPrefix(String indexId) {
+        return StringUtils.isNotEmpty(indexId)? "[" + indexId + "] " : "";
+    }
+
+    protected String getDeleteQuery(String id) {
+        if (MapUtils.isNotEmpty(deleteQueryMappings)) {
+            for (Map.Entry<String, String> mapping : deleteQueryMappings.entrySet()) {
+                if (id.matches(mapping.getKey())) {
+                    return String.format(mapping.getValue(), id);
+                }
             }
         }
 
-        return multiValueMap;
+        return null;
+    }
+
+    protected void addAdditionalFilterQueries(SolrQuery solrQuery) {
+        String query = solrQuery.getQuery();
+        String[] filterQueries = solrQuery.getFilterQueries();
+
+        for (String additionalFilterQuery : additionalFilterQueries) {
+            boolean add = true;
+
+            if (StringUtils.isNotEmpty(query)) {
+                if (query.contains(additionalFilterQuery)) {
+                    add = false;
+                }
+            }
+
+            if (ArrayUtils.isNotEmpty(filterQueries)) {
+                for (String filterQuery : filterQueries) {
+                    if (filterQuery.contains(additionalFilterQuery)) {
+                        add = false;
+                        break;
+                    }
+                }
+            }
+
+            if (add) {
+                solrQuery.addFilterQuery(additionalFilterQuery);
+            }
+        }
     }
 
 }

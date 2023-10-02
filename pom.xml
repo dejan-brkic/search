@@ -55,7 +55,7 @@
         <httpcomponents.httpmime.version>4.3.1</httpcomponents.httpmime.version>
         <jackson.version>2.8.3</jackson.version>
         <spring.version>4.0.3.RELEASE</spring.version>
-        <slf4j.version>1.7.7</slf4j.version>
+        <slf4j.version>1.7.34</slf4j.version>
         <log4j.version>1.2.16</log4j.version>
         <dom4j.version>1.6.1</dom4j.version>
         <jaxen.version>1.1.1</jaxen.version>
